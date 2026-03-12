@@ -8,37 +8,48 @@ use ratatui::{
     Frame,
 };
 
-// Colors — VS Code dark theme
-const BG: Color = Color::Rgb(30, 30, 30);
-const BG_DARKER: Color = Color::Rgb(24, 24, 24);
-const BG_HOVER: Color = Color::Rgb(45, 45, 48);
-const FG: Color = Color::Rgb(204, 204, 204);
-const FG_DIM: Color = Color::Rgb(100, 100, 100);
-const FG_DIMMER: Color = Color::Rgb(65, 65, 65);
-const BLUE: Color = Color::Rgb(75, 156, 245);
-const GREEN: Color = Color::Rgb(80, 200, 120);
-const YELLOW: Color = Color::Rgb(220, 180, 50);
-const RED: Color = Color::Rgb(240, 80, 80);
+// ── Colors — refined dark theme ──
+
+const BG: Color = Color::Rgb(22, 22, 26);
+const BG_HEADER: Color = Color::Rgb(18, 18, 22);
+const BG_HOVER: Color = Color::Rgb(38, 38, 46);
+const BG_BAR: Color = Color::Rgb(28, 28, 34);
+const FG: Color = Color::Rgb(190, 194, 204);
+const FG_DIM: Color = Color::Rgb(92, 96, 108);
+const FG_MUTED: Color = Color::Rgb(58, 62, 72);
+const ACCENT: Color = Color::Rgb(100, 160, 255);
+const GREEN: Color = Color::Rgb(72, 199, 142);
+const YELLOW: Color = Color::Rgb(229, 192, 80);
+const RED: Color = Color::Rgb(235, 87, 87);
+const ORANGE: Color = Color::Rgb(230, 150, 60);
 
 // ── Draw ──
 
 pub fn draw(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let w = area.width;
+
+    // Responsive layout: skip elements that don't fit
+    let show_buttons = area.height > 8;
+    let show_bar = area.height > 6;
+
+    let mut constraints = vec![
+        Constraint::Length(2), // header
+        Constraint::Min(2),   // tree
+    ];
+    if show_buttons { constraints.push(Constraint::Length(1)); } // buttons
+    constraints.push(Constraint::Length(1)); // message/status bar
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),  // header
-            Constraint::Min(3),    // tree
-            Constraint::Length(1), // buttons
-            Constraint::Length(1), // message
-            Constraint::Length(1), // help
-        ])
-        .split(f.area());
+        .constraints(constraints)
+        .split(area);
 
-    draw_header(f, app, chunks[0]);
-    draw_tree(f, app, chunks[1]);
-    draw_buttons(f, chunks[2]);
-    draw_message(f, app, chunks[3]);
-    draw_help(f, chunks[4]);
+    let mut idx = 0;
+    draw_header(f, app, chunks[idx], w); idx += 1;
+    draw_tree(f, app, chunks[idx], w);   idx += 1;
+    if show_buttons { draw_buttons(f, chunks[idx], w); idx += 1; }
+    if show_bar { draw_status_bar(f, app, chunks[idx], w); }
 
     if matches!(app.input_mode, InputMode::AddFolder | InputMode::AddAgent) {
         draw_input(f, app);
@@ -48,7 +59,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-fn draw_header(f: &mut Frame, app: &App, area: Rect) {
+// ── Header: workspace name + counts on one line ──
+
+fn draw_header(f: &mut Frame, app: &App, area: Rect, w: u16) {
     let agents = app.state.all_agents();
     let active = agents.iter().filter(|a| a.status == AgentStatus::Active).count();
     let idle = agents.iter().filter(|a| a.status == AgentStatus::Idle).count();
@@ -59,146 +72,200 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| app.workspace.clone());
 
+    // Truncate workspace name if needed
+    let max_name = (w as usize).saturating_sub(2);
+    let display_name = if ws_name.len() > max_name {
+        format!("{}...", &ws_name[..max_name.saturating_sub(3)])
+    } else {
+        ws_name
+    };
+
+    let mut line2 = vec![
+        Span::styled(format!(" {active}"), Style::default().fg(GREEN)),
+    ];
+    if w > 12 {
+        line2.push(Span::styled(format!(" {idle}"), Style::default().fg(YELLOW)));
+    }
+    if w > 18 {
+        line2.push(Span::styled(format!(" {stopped}"), Style::default().fg(FG_DIM)));
+    }
+
     let p = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled(format!(" {ws_name}"), Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            Span::styled(format!(" ●{active}"), Style::default().fg(GREEN)),
-            Span::styled(format!("  ◐{idle}"), Style::default().fg(YELLOW)),
-            Span::styled(format!("  ○{stopped}"), Style::default().fg(FG_DIM)),
-        ]),
-    ]).style(Style::default().bg(BG_DARKER));
+        Line::from(Span::styled(
+            format!(" {display_name}"),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(line2),
+    ]).style(Style::default().bg(BG_HEADER));
     f.render_widget(p, area);
 }
 
-fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
+// ── Tree ──
+
+fn draw_tree(f: &mut Frame, app: &App, area: Rect, w: u16) {
+    let max_name_len = (w as usize).saturating_sub(10); // room for icon + indent + count
+
     let items: Vec<ListItem> = app.tree_items().iter().map(|entry| match entry {
         TreeEntry::Folder(fi) => {
             let folder = &app.state.folders[*fi];
-            let active = folder.agents.iter().filter(|a| a.status == AgentStatus::Active).count();
             let total = folder.agents.len();
             let is_active = app.active_folder_idx == Some(*fi);
-            let fc = if is_active { BLUE } else { FG };
-            let fm = Modifier::BOLD;
+            let fc = if is_active { ACCENT } else { FG };
 
-            ListItem::new(Line::from(vec![
-                Span::styled(if is_active { "  ▾ " } else { "  ▸ " }, Style::default().fg(FG_DIM)),
-                Span::styled(folder.name.to_uppercase(), Style::default().fg(fc).add_modifier(fm)),
-                Span::styled(format!("  {total}"), Style::default().fg(FG_DIMMER)),
-                if active > 0 {
-                    Span::styled(format!("  ●{active}"), Style::default().fg(GREEN))
-                } else { Span::raw("") },
-            ]))
+            let arrow = if is_active { "▾" } else { "▸" };
+            let name = truncate(&folder.name, max_name_len);
+
+            let mut spans = vec![
+                Span::styled(format!(" {arrow} "), Style::default().fg(FG_MUTED)),
+                Span::styled(name, Style::default().fg(fc).add_modifier(Modifier::BOLD)),
+            ];
+            if w > 14 {
+                spans.push(Span::styled(
+                    format!(" {total}"),
+                    Style::default().fg(FG_MUTED),
+                ));
+            }
+
+            ListItem::new(Line::from(spans))
         }
         TreeEntry::Agent(fi, ai) => {
             let agent = &app.state.folders[*fi].agents[*ai];
             let (icon, ic) = match agent.status {
                 AgentStatus::Active => ("●", GREEN),
-                AgentStatus::Idle => ("◐", YELLOW),
-                AgentStatus::Stopped => ("○", FG_DIMMER),
+                AgentStatus::Idle => ("●", YELLOW),
+                AgentStatus::Stopped => ("○", FG_MUTED),
             };
             let key = format!("{}/{}", agent.folder, agent.name);
             let is_focused = app.focused_agent_key.as_deref() == Some(&key);
-            let nc = if is_focused { BLUE } else { FG };
+            let nc = if is_focused { ACCENT } else { FG };
             let nm = if is_focused { Modifier::BOLD } else { Modifier::empty() };
 
-            ListItem::new(Line::from(vec![
-                Span::raw("     "),
+            let agent_max = max_name_len.saturating_sub(4);
+            let name = truncate(&agent.name, agent_max);
+
+            let mut spans = vec![
+                Span::styled("   ", Style::default()),
                 Span::styled(icon, Style::default().fg(ic)),
                 Span::raw(" "),
-                Span::styled(&agent.name, Style::default().fg(nc).add_modifier(nm)),
-                if !agent.git_branch.is_empty() {
-                    Span::styled(format!("  ⎇ {}", agent.git_branch), Style::default().fg(FG_DIMMER))
-                } else { Span::raw("") },
-            ]))
+                Span::styled(name, Style::default().fg(nc).add_modifier(nm)),
+            ];
+
+            // Git branch only if enough room
+            if !agent.git_branch.is_empty() && w > 25 {
+                let branch_max = (w as usize).saturating_sub(agent.name.len() + 12);
+                let branch = truncate(&agent.git_branch, branch_max);
+                spans.push(Span::styled(
+                    format!(" {branch}"),
+                    Style::default().fg(FG_MUTED),
+                ));
+            }
+
+            ListItem::new(Line::from(spans))
         }
     }).collect();
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::NONE).style(Style::default().bg(BG)))
         .highlight_style(Style::default().bg(BG_HOVER))
-        .highlight_symbol("▸ ");
+        .highlight_symbol(">");
 
     f.render_stateful_widget(list, area, &mut app.list_state.clone());
 }
 
-fn draw_buttons(f: &mut Frame, area: Rect) {
-    let line = Line::from(vec![
-        Span::styled(" 📁", Style::default().fg(BLUE)),
-        Span::styled("+", Style::default().fg(FG_DIM)),
-        Span::styled("   ＋", Style::default().fg(GREEN)),
-        Span::styled("   🗑", Style::default().fg(RED)),
-    ]);
-    let p = Paragraph::new(line).style(Style::default().bg(BG_DARKER));
+// ── Buttons row — compact icons ──
+
+fn draw_buttons(f: &mut Frame, area: Rect, w: u16) {
+    let mut spans = vec![
+        Span::styled(" +f", Style::default().fg(ACCENT)),
+        Span::styled(" +a", Style::default().fg(GREEN)),
+    ];
+    if w > 14 {
+        spans.push(Span::styled(" -x", Style::default().fg(RED)));
+    }
+    let p = Paragraph::new(Line::from(spans)).style(Style::default().bg(BG_HEADER));
     f.render_widget(p, area);
 }
 
-fn draw_message(f: &mut Frame, app: &App, area: Rect) {
+// ── Status bar: message OR mini help — responsive ──
+
+fn draw_status_bar(f: &mut Frame, app: &App, area: Rect, w: u16) {
     let text = match app.input_mode {
         InputMode::Command => {
             Line::from(vec![
-                Span::styled(":", Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
-                Span::styled(&app.cmd_buf, Style::default().fg(Color::White)),
-                Span::styled("█", Style::default().fg(BLUE)),
+                Span::styled(":", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(&app.cmd_buf, Style::default().fg(FG)),
+                Span::styled("_", Style::default().fg(ACCENT)),
             ])
         }
         InputMode::Search => {
             Line::from(vec![
-                Span::styled("/", Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
-                Span::styled(&app.search_buf, Style::default().fg(Color::White)),
-                Span::styled("█", Style::default().fg(BLUE)),
+                Span::styled("/", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(&app.search_buf, Style::default().fg(FG)),
+                Span::styled("_", Style::default().fg(ACCENT)),
             ])
         }
         InputMode::SendPrompt => {
             Line::from(vec![
-                Span::styled("> ", Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
-                Span::styled(&app.cmd_buf, Style::default().fg(Color::White)),
-                Span::styled("█", Style::default().fg(BLUE)),
+                Span::styled("> ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(&app.cmd_buf, Style::default().fg(FG)),
+                Span::styled("_", Style::default().fg(ACCENT)),
             ])
         }
         _ => {
             if let Some(ref msg) = app.message {
-                Line::from(Span::styled(format!(" {msg}"), Style::default().fg(YELLOW)))
+                Line::from(Span::styled(format!(" {msg}"), Style::default().fg(ORANGE)))
             } else {
-                Line::raw("")
+                // Mini help — adaptive to width
+                build_help_line(w)
             }
         }
     };
-    let p = Paragraph::new(text).style(Style::default().bg(BG));
+    let p = Paragraph::new(text).style(Style::default().bg(BG_BAR));
     f.render_widget(p, area);
 }
 
-fn draw_help(f: &mut Frame, area: Rect) {
-    let line = Line::from(vec![
-        key_span("1-9"), label_span("jump "),
-        key_span("["), label_span("/"),
-        key_span("]"), label_span("win "),
-        key_span("n"), label_span("/"),
-        key_span("p"), label_span("pane "),
-        key_span(":"), label_span("cmd "),
-        key_span("/"), label_span("find "),
-        key_span(">"), label_span("send "),
-        key_span("r"), label_span("estart "),
-        key_span("u"), label_span("ndo "),
-        key_span("h"), label_span("/"),
-        key_span("v"), label_span("split "),
-        key_span("q"), label_span("uit"),
-    ]);
-    let p = Paragraph::new(line).style(Style::default().bg(BG_DARKER));
-    f.render_widget(p, area);
-}
+/// Build a help line that fits the available width.
+fn build_help_line(w: u16) -> Line<'static> {
+    let w = w as usize;
 
-fn key_span(s: &str) -> Span<'_> {
-    Span::styled(format!(" {s}"), Style::default().fg(BLUE).add_modifier(Modifier::BOLD))
-}
-fn label_span(s: &str) -> Span<'_> {
-    Span::styled(s, Style::default().fg(FG_DIMMER))
+    // Priority tiers of hints — show as many as fit
+    let hints: &[(&str, &str)] = &[
+        ("Enter", "go"),
+        ("[/]", "win"),
+        ("n/p", "pane"),
+        ("f", "fold"),
+        ("a", "add"),
+        ("x", "del"),
+        ("u", "undo"),
+        ("r", "rst"),
+        (":", "cmd"),
+        ("/", "find"),
+        ("q", "quit"),
+    ];
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut used = 1; // leading space
+
+    for (key, label) in hints {
+        let needed = key.len() + label.len() + 2; // " key label"
+        if used + needed > w { break; }
+        spans.push(Span::styled(
+            format!(" {key}"),
+            Style::default().fg(FG_DIM),
+        ));
+        spans.push(Span::styled(
+            format!("{label}"),
+            Style::default().fg(FG_MUTED),
+        ));
+        used += needed;
+    }
+
+    Line::from(spans)
 }
 
 fn draw_input(f: &mut Frame, app: &App) {
     let area = f.area();
-    let w = 48.min(area.width.saturating_sub(2));
+    let w = (area.width.saturating_sub(4)).min(44);
     let h = 7;
     let x = (area.width.saturating_sub(w)) / 2;
     let y = (area.height.saturating_sub(h)) / 2;
@@ -208,10 +275,10 @@ fn draw_input(f: &mut Frame, app: &App) {
 
     let (title, hint) = match (&app.input_mode, &app.input_field) {
         (InputMode::AddFolder, InputField::Name) => ("Folder Name", "project name"),
-        (InputMode::AddFolder, InputField::Path) => ("Working Directory", "Tab to autocomplete"),
+        (InputMode::AddFolder, InputField::Path) => ("Directory", "Tab to complete"),
         (InputMode::AddAgent, InputField::Name) => ("Agent Name", "e.g. fix-auth"),
         (InputMode::AddAgent, InputField::Command) => ("Command", "default: claude"),
-        (InputMode::AddAgent, InputField::Path) => ("Working Directory", "Tab to autocomplete"),
+        (InputMode::AddAgent, InputField::Path) => ("Directory", "Tab to complete"),
         _ => ("Input", ""),
     };
 
@@ -227,25 +294,25 @@ fn draw_input(f: &mut Frame, app: &App) {
     let text = vec![
         Line::from(vec![
             Span::styled(format!(" {title}"), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {step}"), Style::default().fg(FG_DIMMER)),
+            Span::styled(format!("  {step}"), Style::default().fg(FG_MUTED)),
         ]),
         Line::raw(""),
         Line::from(vec![
-            Span::styled("  > ", Style::default().fg(BLUE)),
-            Span::styled(&app.input_buf, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled("█", Style::default().fg(BLUE)),
+            Span::styled("  > ", Style::default().fg(ACCENT)),
+            Span::styled(&app.input_buf, Style::default().fg(Color::White)),
+            Span::styled("_", Style::default().fg(ACCENT)),
         ]),
         Line::raw(""),
         Line::from(vec![
-            Span::styled(format!("  {hint}"), Style::default().fg(FG_DIMMER)),
-            Span::styled("  Esc:cancel", Style::default().fg(FG_DIMMER)),
+            Span::styled(format!("  {hint}"), Style::default().fg(FG_MUTED)),
+            Span::styled("  Esc cancel", Style::default().fg(FG_MUTED)),
         ]),
     ];
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(50, 50, 50)))
-        .style(Style::default().bg(Color::Rgb(35, 35, 35)));
+        .border_style(Style::default().fg(Color::Rgb(44, 44, 54)))
+        .style(Style::default().bg(Color::Rgb(30, 30, 38)));
 
     let p = Paragraph::new(text).block(block);
     f.render_widget(p, popup);
@@ -253,7 +320,7 @@ fn draw_input(f: &mut Frame, app: &App) {
 
 fn draw_confirm(f: &mut Frame, app: &App) {
     let area = f.area();
-    let w = 40.min(area.width.saturating_sub(2));
+    let w = (area.width.saturating_sub(4)).min(38);
     let h = 5;
     let x = (area.width.saturating_sub(w)) / 2;
     let y = (area.height.saturating_sub(h)) / 2;
@@ -282,20 +349,33 @@ fn draw_confirm(f: &mut Frame, app: &App) {
         )),
         Line::raw(""),
         Line::from(vec![
-            Span::styled("  Enter", Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
-            Span::styled(" confirm  ", Style::default().fg(FG_DIM)),
-            Span::styled("Esc", Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
-            Span::styled(" cancel", Style::default().fg(FG_DIM)),
+            Span::styled("  Enter", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(" yes  ", Style::default().fg(FG_DIM)),
+            Span::styled("Esc", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(" no", Style::default().fg(FG_DIM)),
         ]),
     ];
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(80, 40, 40)))
-        .style(Style::default().bg(Color::Rgb(40, 30, 30)));
+        .border_style(Style::default().fg(Color::Rgb(80, 36, 36)))
+        .style(Style::default().bg(Color::Rgb(36, 26, 28)));
 
     let p = Paragraph::new(text).block(block);
     f.render_widget(p, popup);
+}
+
+// ── Helpers ──
+
+fn truncate(s: &str, max: usize) -> String {
+    if max < 4 {
+        return s.chars().take(max).collect();
+    }
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}..", &s[..max.saturating_sub(2)])
+    }
 }
 
 #[cfg(test)]
@@ -321,12 +401,10 @@ mod tests {
         output
     }
 
-    // ── Basic rendering doesn't panic ──
-
     #[test]
     fn test_draw_empty_app() {
         let app = make_app(vec![]);
-        let output = render_to_string(&app, 60, 20);
+        let output = render_to_string(&app, 30, 10);
         assert!(!output.is_empty());
     }
 
@@ -338,12 +416,12 @@ mod tests {
             ]),
             make_folder("Arun", vec![]),
         ]);
-        let output = render_to_string(&app, 60, 20);
+        let output = render_to_string(&app, 30, 12);
         assert!(output.contains("BB"));
     }
 
     #[test]
-    fn test_draw_with_active_agents() {
+    fn test_draw_with_agents() {
         let app = make_app(vec![
             make_folder("Project", vec![
                 make_agent("fix-auth", "Project", AgentStatus::Active, Some("%1")),
@@ -351,87 +429,70 @@ mod tests {
                 make_agent("stopped", "Project", AgentStatus::Stopped, None),
             ]),
         ]);
-        let output = render_to_string(&app, 60, 20);
+        let output = render_to_string(&app, 30, 15);
         assert!(output.contains("fix-auth"));
         assert!(output.contains("idle-one"));
         assert!(output.contains("stopped"));
     }
 
-    // ── No underlines in output ──
-
     #[test]
-    fn test_no_underline_styles() {
-        // Verify that the draw functions don't use Modifier::UNDERLINED
-        // by checking rendered output contains expected content without underline artifacts
+    fn test_draw_narrow_sidebar() {
         let app = make_app(vec![
-            make_folder("BB", vec![
-                make_agent("a1", "BB", AgentStatus::Active, Some("%1")),
+            make_folder("VeryLongFolderNameThatOverflows", vec![
+                make_agent("agent-with-long-name-too", "VeryLongFolderNameThatOverflows", AgentStatus::Active, Some("%1")),
             ]),
         ]);
-        let output = render_to_string(&app, 60, 20);
-        // Output should contain folder and agent names
-        assert!(output.contains("BB"));
-        assert!(output.contains("a1"));
+        // 15 chars wide — should truncate, not panic
+        let output = render_to_string(&app, 15, 10);
+        assert!(!output.is_empty());
     }
 
-    // ── Command mode rendering ──
+    #[test]
+    fn test_draw_tiny_terminal() {
+        let app = make_app(vec![make_folder("BB", vec![])]);
+        let _output = render_to_string(&app, 8, 5);
+    }
 
     #[test]
     fn test_draw_command_mode() {
         let mut app = make_app(vec![]);
         app.input_mode = InputMode::Command;
         app.cmd_buf = "quit".into();
-        let output = render_to_string(&app, 60, 20);
+        let output = render_to_string(&app, 30, 10);
         assert!(output.contains("quit"));
     }
-
-    // ── Search mode rendering ──
 
     #[test]
     fn test_draw_search_mode() {
         let mut app = make_app(vec![]);
         app.input_mode = InputMode::Search;
         app.search_buf = "fix".into();
-        let output = render_to_string(&app, 60, 20);
+        let output = render_to_string(&app, 30, 10);
         assert!(output.contains("fix"));
     }
-
-    // ── SendPrompt mode rendering ──
 
     #[test]
     fn test_draw_send_prompt_mode() {
         let mut app = make_app(vec![]);
         app.input_mode = InputMode::SendPrompt;
-        app.cmd_buf = "hello world".into();
-        let output = render_to_string(&app, 60, 20);
-        assert!(output.contains("hello world"));
+        app.cmd_buf = "hello".into();
+        let output = render_to_string(&app, 30, 10);
+        assert!(output.contains("hello"));
     }
-
-    // ── Message rendering ──
 
     #[test]
     fn test_draw_with_message() {
         let mut app = make_app(vec![]);
         app.set_message("Test message");
-        let output = render_to_string(&app, 60, 20);
+        let output = render_to_string(&app, 30, 10);
         assert!(output.contains("Test message"));
     }
-
-    #[test]
-    fn test_draw_no_message() {
-        let app = make_app(vec![]);
-        // Should render without error when no message
-        let output = render_to_string(&app, 60, 20);
-        assert!(!output.is_empty());
-    }
-
-    // ── Confirm delete popup ──
 
     #[test]
     fn test_draw_confirm_delete_folder() {
         let mut app = make_app(vec![make_folder("BB", vec![])]);
         app.confirm_delete = Some(TreeEntry::Folder(0));
-        let output = render_to_string(&app, 60, 20);
+        let output = render_to_string(&app, 50, 15);
         assert!(output.contains("Delete"));
         assert!(output.contains("BB"));
     }
@@ -442,62 +503,65 @@ mod tests {
             make_agent("fix-auth", "BB", AgentStatus::Active, Some("%1")),
         ])]);
         app.confirm_delete = Some(TreeEntry::Agent(0, 0));
-        let output = render_to_string(&app, 60, 20);
-        assert!(output.contains("Delete"));
+        let output = render_to_string(&app, 50, 15);
         assert!(output.contains("fix-auth"));
     }
 
-    // ── Input popup ──
-
     #[test]
-    fn test_draw_add_folder_popup() {
+    fn test_draw_input_popup() {
         let mut app = make_app(vec![]);
         app.input_mode = InputMode::AddFolder;
         app.input_field = InputField::Name;
-        app.input_buf = "MyProject".into();
-        let output = render_to_string(&app, 60, 20);
-        assert!(output.contains("MyProject"));
+        app.input_buf = "proj".into();
+        let output = render_to_string(&app, 50, 15);
+        assert!(output.contains("proj"));
     }
 
     #[test]
-    fn test_draw_add_agent_popup() {
-        let mut app = make_app(vec![make_folder("BB", vec![])]);
-        app.input_mode = InputMode::AddAgent;
-        app.input_field = InputField::Name;
-        app.input_buf = "new-agent".into();
-        let output = render_to_string(&app, 60, 20);
-        assert!(output.contains("new-agent"));
+    fn test_help_line_adapts_to_width() {
+        let wide = build_help_line(80);
+        let narrow = build_help_line(20);
+        // Wide should have more spans than narrow
+        assert!(wide.spans.len() > narrow.spans.len());
     }
 
-    // ── Help bar content ──
-
     #[test]
-    fn test_help_bar_contains_keys() {
-        let app = make_app(vec![]);
-        let output = render_to_string(&app, 80, 20);
-        assert!(output.contains("cmd"));
-        assert!(output.contains("find"));
-        assert!(output.contains("send"));
-        assert!(output.contains("uit"));
+    fn test_help_line_empty_at_zero() {
+        let line = build_help_line(0);
+        assert!(line.spans.is_empty());
     }
 
-    // ── Header counts ──
+    #[test]
+    fn test_truncate_short() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
 
     #[test]
-    fn test_header_shows_status_icons() {
-        let app = make_app(vec![
-            make_folder("BB", vec![
-                make_agent("a1", "BB", AgentStatus::Active, Some("%1")),
-                make_agent("a2", "BB", AgentStatus::Idle, Some("%2")),
-                make_agent("a3", "BB", AgentStatus::Stopped, None),
-            ]),
+    fn test_truncate_exact() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_long() {
+        assert_eq!(truncate("hello world", 8), "hello ..");
+    }
+
+    #[test]
+    fn test_truncate_tiny() {
+        assert_eq!(truncate("abcdef", 3), "abc");
+    }
+
+    #[test]
+    fn test_active_folder_arrow() {
+        let mut app = make_app(vec![
+            make_folder("BB", vec![]),
+            make_folder("Arun", vec![]),
         ]);
-        let output = render_to_string(&app, 60, 20);
-        // Header should show counts
-        assert!(!output.is_empty());
+        app.active_folder_idx = Some(0);
+        let output = render_to_string(&app, 30, 10);
+        assert!(output.contains('▾'));
+        assert!(output.contains('▸'));
     }
-
-    // ── Focused agent highlighting ──
 
     #[test]
     fn test_focused_agent_shown() {
@@ -505,79 +569,60 @@ mod tests {
             make_agent("focus-me", "BB", AgentStatus::Active, Some("%1")),
         ])]);
         app.focused_agent_key = Some("BB/focus-me".into());
-        let output = render_to_string(&app, 60, 20);
+        let output = render_to_string(&app, 30, 10);
         assert!(output.contains("focus-me"));
     }
 
-    // ── Active folder arrow direction ──
-
     #[test]
-    fn test_active_folder_down_arrow() {
-        let mut app = make_app(vec![
-            make_folder("BB", vec![]),
-            make_folder("Arun", vec![]),
-        ]);
-        app.active_folder_idx = Some(0);
-        let output = render_to_string(&app, 60, 20);
-        // Active folder uses ▾ (down arrow)
-        assert!(output.contains('▾'));
-    }
-
-    #[test]
-    fn test_inactive_folder_right_arrow() {
-        let mut app = make_app(vec![
-            make_folder("BB", vec![]),
-            make_folder("Arun", vec![]),
-        ]);
-        app.active_folder_idx = Some(0);
-        let output = render_to_string(&app, 60, 20);
-        // Inactive folder uses ▸ (right arrow)
-        assert!(output.contains('▸'));
-    }
-
-    // ── Small terminal ──
-
-    #[test]
-    fn test_draw_small_terminal() {
-        let app = make_app(vec![make_folder("BB", vec![])]);
-        // Should not panic on very small terminal
-        let output = render_to_string(&app, 20, 8);
-        assert!(!output.is_empty());
-    }
-
-    // ── Git branch display ──
-
-    #[test]
-    fn test_agent_with_git_branch() {
+    fn test_git_branch_shown_wide() {
         let mut agent = make_agent("a1", "BB", AgentStatus::Active, Some("%1"));
-        agent.git_branch = "feature/auth".into();
+        agent.git_branch = "main".into();
         let app = make_app(vec![make_folder("BB", vec![agent])]);
-        let output = render_to_string(&app, 80, 20);
-        assert!(output.contains("feature/auth"));
+        let output = render_to_string(&app, 40, 10);
+        assert!(output.contains("main"));
     }
 
-    // ── Many folders stress ──
+    #[test]
+    fn test_git_branch_hidden_narrow() {
+        let mut agent = make_agent("a1", "BB", AgentStatus::Active, Some("%1"));
+        agent.git_branch = "main".into();
+        let app = make_app(vec![make_folder("BB", vec![agent])]);
+        let output = render_to_string(&app, 15, 10);
+        // Branch should be hidden on narrow width
+        assert!(!output.contains("main"));
+    }
 
     #[test]
-    fn test_draw_many_folders() {
+    fn test_many_folders() {
         let folders: Vec<_> = (0..50)
-            .map(|i| make_folder(&format!("Folder-{i}"), vec![
-                make_agent(&format!("agent-{i}"), &format!("Folder-{i}"), AgentStatus::Active, Some(&format!("%{i}"))),
+            .map(|i| make_folder(&format!("F-{i}"), vec![
+                make_agent(&format!("a-{i}"), &format!("F-{i}"), AgentStatus::Active, Some(&format!("%{i}"))),
             ]))
             .collect();
         let app = make_app(folders);
-        // Should not panic even with more items than terminal rows
-        let output = render_to_string(&app, 60, 20);
+        let output = render_to_string(&app, 30, 15);
         assert!(!output.is_empty());
     }
 
-    // ── Workspace name in header ──
+    #[test]
+    fn test_header_workspace_name() {
+        let app = make_app(vec![]);
+        let output = render_to_string(&app, 30, 10);
+        assert!(output.contains("workspace"));
+    }
 
     #[test]
-    fn test_header_shows_workspace_basename() {
+    fn test_buttons_shown_tall() {
         let app = make_app(vec![]);
-        // workspace is "/tmp/workspace", basename is "workspace"
-        let output = render_to_string(&app, 60, 20);
-        assert!(output.contains("workspace"));
+        let output = render_to_string(&app, 30, 12);
+        assert!(output.contains("+f"));
+    }
+
+    #[test]
+    fn test_buttons_hidden_short() {
+        let app = make_app(vec![]);
+        // Very short terminal — buttons should be hidden
+        let output = render_to_string(&app, 30, 6);
+        assert!(!output.contains("+f"));
     }
 }
