@@ -5,7 +5,7 @@ edition = "2021"
 description = "Agent Command Center by FeynixAI — a tmux-based TUI for managing teams of CLI agents"
 license = "MIT"
 repository = "https://github.com/feynixai/acc"
-homepage = "https://github.com/feynixai/acc"
+homepage = "https://feynixai.com"
 authors = ["FeynixAI <hello@feynix.ai>"]
 
 [dependencies]

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="FeynixAI" width="200" />
+  <img src="assets/logo.svg" alt="FeynixAI" width="200" />
 </p>
 
 <h1 align="center">ACC — Agent Command Center</h1>
@@ -211,4 +211,6 @@ src/
 
 ## License
 
-MIT — [FeynixAI](https://github.com/feynixai)
+MIT — [FeynixAI](https://feynixai.com)
+
+Copyright (c) 2026 [FeynixAI](https://feynixai.com). All rights reserved.

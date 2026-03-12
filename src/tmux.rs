@@ -232,7 +232,7 @@ pub fn create_and_attach(session: &str, workspace: &str, exe: &str) {
     // Split: sidebar on left (20%)
     let sidebar_cmd = format!("{} sidebar '{}'", exe, workspace);
     tmux(&[
-        "split-window", "-hb", "-l", "20%",
+        "split-window", "-fhb", "-l", "20%",
         "-t", &format!("{session}:1"),
         &sidebar_cmd,
     ]);
@@ -281,8 +281,10 @@ pub fn create_sidebar(sidebar_cmd: &str) -> Option<(String, String)> {
     let right_pane = current_pane();
     if right_pane.is_empty() { return None; }
 
+    // -f  = full-window split (spans entire window height, not just one pane)
+    // -hb = horizontal, place new pane before (left)
     let sidebar = tmux(&[
-        "split-window", "-hb", "-l", "20%",
+        "split-window", "-fhb", "-l", "20%",
         "-P", "-F", "#{pane_id}",
         sidebar_cmd,
     ]);
