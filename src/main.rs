@@ -7,6 +7,22 @@ fn main() -> io::Result<()> {
     let exe_str = exe.to_string_lossy().to_string();
 
     match args.get(1).map(|s| s.as_str()) {
+        Some("list" | "ls") => {
+            acc::cli::list_agents();
+            return Ok(());
+        }
+        Some("read") => {
+            acc::cli::read_agent(&args[2..]);
+            return Ok(());
+        }
+        Some("send") => {
+            acc::cli::send_to_agent(&args[2..]);
+            return Ok(());
+        }
+        Some("root") => {
+            acc::cli::start_root();
+            return Ok(());
+        }
         Some("sidebar-toggle") => {
             // Called from tmux keybinding — toggle sidebar
             if acc::tmux::inside_tmux() {
@@ -27,7 +43,11 @@ fn main() -> io::Result<()> {
         Some("help" | "-h" | "--help") => {
             println!("Agent Command Center\n");
             println!("  acc           Launch (or toggle sidebar)");
-            println!("  acc kill      Close sidebar\n");
+            println!("  acc kill      Close sidebar");
+            println!("  acc list      List all agents");
+            println!("  acc read      Read agent output");
+            println!("  acc send      Send prompt to agent");
+            println!("  acc root      Start root commander\n");
             println!("Keys: 1-9=jump [/]=win n/p=pane :=cmd /=find >=send q=quit");
             return Ok(());
         }
