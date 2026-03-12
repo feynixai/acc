@@ -1,0 +1,19 @@
+[package]
+name = "acc"
+version = "0.1.0"
+edition = "2021"
+description = "Agent Command Center — a tmux-based TUI for managing teams of CLI agents"
+license = "MIT"
+repository = "https://github.com/feynixai/acc"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
