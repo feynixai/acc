@@ -41,7 +41,7 @@ fn main() -> io::Result<()> {
             return Ok(());
         }
         Some("help" | "-h" | "--help") => {
-            println!("Agent Command Center\n");
+            println!("ACC — Agent Command Center by FeynixAI\n");
             println!("  acc           Launch (or toggle sidebar)");
             println!("  acc kill      Close sidebar");
             println!("  acc list      List all agents");
@@ -49,6 +49,7 @@ fn main() -> io::Result<()> {
             println!("  acc send      Send prompt to agent");
             println!("  acc root      Start root commander\n");
             println!("Keys: 1-9=jump [/]=win n/p=pane :=cmd /=find >=send q=quit");
+            println!("\nhttps://github.com/feynixai/acc");
             return Ok(());
         }
         Some("sidebar") => {

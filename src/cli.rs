@@ -223,9 +223,9 @@ fn find_workspace_root(session: &str) -> String {
     env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "/tmp".into())
 }
 
-const ROOT_CLAUDE_MD: &str = r#"# Root Commander
+const ROOT_CLAUDE_MD: &str = r#"# Root Commander — FeynixAI ACC
 
-You are the Root Commander — an orchestrator agent that manages other agents running in this tmux session.
+You are the Root Commander — an orchestrator agent that manages other agents running in this tmux session (powered by FeynixAI ACC).
 
 ## Available CLI Tools
 
