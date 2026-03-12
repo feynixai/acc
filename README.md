@@ -95,12 +95,9 @@ acc root              # Launch root commander
 
 | Key | Action |
 |-----|--------|
-| `j` / `↓` | Move down |
-| `k` / `↑` | Move up |
-| `g` / `G` | Jump to top / bottom |
+| `↑` / `↓` | Move up / down |
 | `Enter` | Focus selected |
 | `[` / `]` | Previous / next folder |
-| `n` / `p` | Next / previous pane |
 
 ### Agent Management
 
