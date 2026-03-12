@@ -135,51 +135,179 @@ pub fn focus_agent(app: &mut App, fi: usize, ai: usize) {
     if ai >= app.state.folders[fi].agents.len() { return; }
 
     let agent = &app.state.folders[fi].agents[ai];
-    if let Some(ref pane_id) = agent.pane_id {
-        tmux::select_pane(pane_id);
-        app.focused_agent_key = Some(format!("{}/{}", agent.folder, agent.name));
-    } else {
+    let target_pane_id = agent.pane_id.clone();
+    let is_hidden = agent.hidden;
+    let agent_key = format!("{}/{}", agent.folder, agent.name);
+    let folder_name = app.state.folders[fi].name.clone();
+    let session = app.session.clone();
+
+    let Some(ref target_pid) = target_pane_id else {
         app.set_message("Pane not running");
+        return;
+    };
+
+    // If selected pane is hidden, bring it back first
+    if is_hidden {
+        // Join back next to sidebar
+        if let Some(ref sidebar_id) = app.sidebar_pane_id {
+            tmux::join_pane_back(target_pid, sidebar_id);
+        } else if let Some(ref win_idx) = app.state.folders[fi].window_index {
+            let target = format!("{}:{}", session, win_idx);
+            tmux::join_pane_back(target_pid, &target);
+        }
+    }
+
+    // Hide all OTHER visible (non-hidden) agent panes to background
+    let other_panes: Vec<String> = app.state.folders[fi].agents.iter()
+        .filter(|a| {
+            a.pane_id.as_deref() != Some(target_pid)
+                && !a.hidden
+                && a.pane_id.is_some()
+        })
+        .filter_map(|a| a.pane_id.clone())
+        .collect();
+
+    for pid in &other_panes {
+        tmux::break_pane_to_background(pid, &session, &folder_name);
+    }
+
+    tmux::select_pane(target_pid);
+    app.focused_agent_key = Some(agent_key);
+
+    // Re-enforce sidebar width — pane joins/breaks cause tmux to shrink it
+    if let Some(ref sidebar_id) = app.sidebar_pane_id {
+        tmux::resize_sidebar(sidebar_id);
+    }
+
+    sync_current_window(app);
+}
+
+/// Hide the selected pane to background (c key — VS Code close-tab behavior).
+/// Process keeps running, pane just disappears from the split layout.
+pub fn hide_pane(app: &mut App) {
+    let Some(entry) = app.selected_entry() else { return };
+    match entry {
+        TreeEntry::Agent(fi, ai) => {
+            if fi >= app.state.folders.len() { return; }
+            if ai >= app.state.folders[fi].agents.len() { return; }
+            let agent = &app.state.folders[fi].agents[ai];
+            if agent.hidden {
+                app.set_message("Already hidden");
+                return;
+            }
+            let name = agent.name.clone();
+            let folder_name = app.state.folders[fi].name.clone();
+            if let Some(ref pane_id) = agent.pane_id {
+                tmux::break_pane_to_background(pane_id, &app.session, &folder_name);
+                if let Some(ref sidebar_id) = app.sidebar_pane_id {
+                    tmux::resize_sidebar(sidebar_id);
+                }
+                app.set_message(&format!("Hidden: {name}"));
+                sync_current_window(app);
+            } else {
+                app.set_message("Pane not running");
+            }
+        }
+        TreeEntry::Folder(_) => {
+            app.set_message("Select an agent to hide");
+        }
     }
 }
 
 // ── Split: h = horizontal (top/bottom), v = vertical (left/right) ──
 
+/// h/v: Show the selected agent in a split alongside the currently focused agent.
+/// - If selected agent is hidden (background), join it back as a split.
+/// - If selected agent is the focused one, create a new shell split.
+/// - Direction: 'h' = horizontal (top/bottom), 'v' = vertical (left/right).
 pub fn split_agent(app: &mut App, direction: char) {
     let Some(entry) = app.selected_entry() else { return };
     let (fi, ai) = match entry {
         TreeEntry::Agent(fi, ai) => (fi, ai),
-        TreeEntry::Folder(fi) => {
-            if let Some(a) = app.state.folders.get(fi).and_then(|f| f.agents.first()) {
-                if a.pane_id.is_some() { (fi, 0) }
-                else { app.set_message("No running panes"); return; }
-            } else {
-                app.set_message("Folder empty"); return;
-            }
+        TreeEntry::Folder(_) => {
+            app.set_message("Select an agent to split");
+            return;
         }
     };
 
+    if fi >= app.state.folders.len() || ai >= app.state.folders[fi].agents.len() { return; }
+
     let agent = &app.state.folders[fi].agents[ai];
-    let Some(ref target_pane) = agent.pane_id else {
-        app.set_message("Pane not running"); return;
+    let Some(ref selected_pane) = agent.pane_id else {
+        app.set_message("Pane not running");
+        return;
     };
-    let cwd = agent.working_dir.clone();
-    let target = target_pane.clone();
+    let selected_pane = selected_pane.clone();
+    let selected_name = agent.name.clone();
+    let is_hidden = agent.hidden;
+    let folder_name = app.state.folders[fi].name.clone();
+    let session = app.session.clone();
 
-    let new_pane = match direction {
-        'h' => tmux::split_h(&target, "", &cwd),
-        'v' => tmux::split_v(&target, "", &cwd),
-        _ => None,
-    };
+    // Find the currently visible (focused) agent's pane as the split target
+    let focused_pane = app.focused_agent_key.as_ref().and_then(|key| {
+        app.state.folders[fi].agents.iter()
+            .find(|a| {
+                let k = format!("{}/{}", a.folder, a.name);
+                k == *key && !a.hidden && a.pane_id.is_some()
+            })
+            .and_then(|a| a.pane_id.clone())
+    });
 
-    if let Some(ref new_id) = new_pane {
-        let short_id = new_id.trim_start_matches('%');
-        let name = format!("pane-{short_id}");
-        tmux::set_pane_title(new_id, &name);
-        app.set_message(&format!("Split: {name}"));
+    let target_pane = if let Some(ref fp) = focused_pane {
+        fp.clone()
     } else {
-        app.set_message("Split failed");
+        // No focused agent — use the selected agent itself
+        selected_pane.clone()
+    };
+
+    if is_hidden {
+        // Selected agent is in background — join it back as a split.
+        // -b = place before target (left/top), so new pane gets index 1.
+        let join_flag = match direction {
+            'h' => "-v", // horizontal split = tmux vertical (top/bottom)
+            _ => "-h",   // vertical split = tmux horizontal (left/right)
+        };
+        tmux::tmux_cmd(&[
+            "join-pane", join_flag, "-b",
+            "-s", &selected_pane,
+            "-t", &target_pane,
+        ]);
+        app.set_message(&format!("Split: {selected_name}"));
+    } else if selected_pane == target_pane {
+        // Same pane — create a new shell split before it (left/top)
+        let cwd = agent.working_dir.clone();
+        let new_pane = match direction {
+            'h' => tmux::split_h_before(&target_pane, "", &cwd),
+            'v' => tmux::split_v_before(&target_pane, "", &cwd),
+            _ => None,
+        };
+        if let Some(ref new_id) = new_pane {
+            let short_id = new_id.trim_start_matches('%');
+            let name = format!("pane-{short_id}");
+            tmux::set_pane_title(new_id, &name);
+            app.set_message(&format!("Split: {name}"));
+        } else {
+            app.set_message("Split failed");
+        }
+    } else {
+        // Selected agent is visible but not focused — hide it first, then join as split
+        tmux::break_pane_to_background(&selected_pane, &session, &folder_name);
+        let join_flag = match direction {
+            'h' => "-v",
+            _ => "-h",
+        };
+        tmux::tmux_cmd(&[
+            "join-pane", join_flag, "-b",
+            "-s", &selected_pane,
+            "-t", &target_pane,
+        ]);
+        app.set_message(&format!("Split: {selected_name}"));
     }
+
+    if let Some(ref sidebar_id) = app.sidebar_pane_id {
+        tmux::resize_sidebar(sidebar_id);
+    }
+    sync_current_window(app);
 }
 
 // ── Close pane (d key) ──
@@ -346,6 +474,84 @@ pub fn undo_last(app: &mut App) {
     }
 }
 
+// ── Rename (R key) ──
+
+pub fn start_rename(app: &mut App) {
+    let Some(entry) = app.selected_entry() else {
+        app.set_message("Nothing selected");
+        return;
+    };
+    // Pre-fill with current name
+    let name = match entry {
+        TreeEntry::Folder(fi) => {
+            if fi < app.state.folders.len() { app.state.folders[fi].name.clone() }
+            else { return; }
+        }
+        TreeEntry::Agent(fi, ai) => {
+            if fi < app.state.folders.len() && ai < app.state.folders[fi].agents.len() {
+                app.state.folders[fi].agents[ai].name.clone()
+            } else { return; }
+        }
+    };
+    app.input_mode = InputMode::Rename;
+    app.input_buf = name;
+}
+
+pub fn handle_rename_key(app: &mut App, key: crossterm::event::KeyCode) {
+    use crossterm::event::KeyCode;
+    match key {
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.input_buf.clear();
+        }
+        KeyCode::Backspace => { app.input_buf.pop(); }
+        KeyCode::Char(c) => { app.input_buf.push(c); }
+        KeyCode::Enter => {
+            let new_name = app.input_buf.clone();
+            app.input_buf.clear();
+            app.input_mode = InputMode::Normal;
+            if new_name.is_empty() { return; }
+            commit_rename(app, &new_name);
+        }
+        _ => {}
+    }
+}
+
+fn commit_rename(app: &mut App, name: &str) {
+    let Some(entry) = app.selected_entry() else { return; };
+    match entry {
+        TreeEntry::Agent(fi, ai) => {
+            if fi < app.state.folders.len() && ai < app.state.folders[fi].agents.len() {
+                if let Some(ref pane_id) = app.state.folders[fi].agents[ai].pane_id {
+                    crate::tmux::set_pane_title(pane_id, name);
+                }
+                app.state.folders[fi].agents[ai].name = name.to_string();
+                app.set_message(&format!("Renamed: {name}"));
+            }
+        }
+        TreeEntry::Folder(fi) => {
+            if fi < app.state.folders.len() {
+                let old = app.state.folders[fi].name.clone();
+                app.state.folders[fi].name = name.to_string();
+                if let Some(ref win) = app.state.folders[fi].window_index {
+                    crate::tmux::rename_window(&app.session, win, name);
+                }
+                save_state(&app.state, &app.workspace);
+                app.set_message(&format!("Renamed: {old} → {name}"));
+            }
+        }
+    }
+}
+
+// ── Focus detection ──
+
+pub fn update_sidebar_focus(app: &mut App) {
+    if let Some(ref sidebar_id) = app.sidebar_pane_id {
+        let active_pane = crate::tmux::current_pane();
+        app.sidebar_focused = active_pane == *sidebar_id;
+    }
+}
+
 // ── Navigation ──
 
 pub fn move_selection(app: &mut App, delta: i32) {
@@ -416,29 +622,17 @@ pub fn prev_pane(app: &mut App) {
     }
 }
 
-pub fn handle_click(app: &mut App, col: u16, row: u16, size: ratatui::layout::Size) {
+pub fn handle_click(app: &mut App, _col: u16, row: u16, size: ratatui::layout::Size) {
     let height = size.height;
-    let tree_start = 2u16;
-    let tree_end = height.saturating_sub(3);
-
-    // Toolbar button clicks (buttons row)
-    let buttons_row = height.saturating_sub(3);
-    if row == buttons_row {
-        if col < 6 {
-            start_add_folder(app);
-        } else if col < 12 {
-            start_add_agent(app);
-        } else if col < 18 {
-            if app.selected_entry().is_some() {
-                app.confirm_delete = app.selected_entry();
-            }
-        }
-        return;
-    }
+    // Layout: header(1) + tree(variable) + status(1)
+    let tree_start = 1u16;
+    let tree_end = height.saturating_sub(1);
 
     // Tree area: single click = select, double click = activate
     if row >= tree_start && row < tree_end {
-        let idx = (row - tree_start) as usize;
+        // Account for list scroll offset
+        let scroll_offset = app.list_state.offset();
+        let idx = (row - tree_start) as usize + scroll_offset;
         let items = app.tree_items();
         if idx < items.len() {
             let now = std::time::Instant::now();
@@ -618,16 +812,50 @@ pub fn commit_input(app: &mut App) {
                     let cmd = app.pending_agent_cmd.clone();
                     let agent_name = app.pending_agent_name.clone();
 
-                    let panes = tmux::list_current_window_panes();
-                    if let Some(target) = panes.first() {
-                        if let Some(new_id) = tmux::split_v(&target.pane_id, &cmd, &wdir) {
-                            tmux::set_pane_title(&new_id, &agent_name);
-                            app.set_message(&format!("Launched: {agent_name}"));
-                        } else {
-                            app.set_message("Split failed");
-                        }
+                    // Find a pane to split from: focused agent, any visible pane, or sidebar
+                    let split_target = app.focused_agent_key.as_ref()
+                        .and_then(|key| {
+                            for folder in &app.state.folders {
+                                for agent in &folder.agents {
+                                    if !agent.hidden && format!("{}/{}", agent.folder, agent.name) == *key {
+                                        return agent.pane_id.clone();
+                                    }
+                                }
+                            }
+                            None
+                        })
+                        .or_else(|| {
+                            // Any visible pane in current window
+                            tmux::list_current_window_panes().first().map(|p| p.pane_id.clone())
+                        })
+                        .or_else(|| {
+                            // Last resort: sidebar pane
+                            app.sidebar_pane_id.clone()
+                        });
+
+                    let Some(ref target) = split_target else {
+                        app.set_message("No pane available");
+                        app.input_mode = InputMode::Normal;
+                        return;
+                    };
+
+                    // Always create a new split pane for the agent
+                    let shell_cmd = if !cmd.is_empty() && cmd != "zsh" && cmd != "bash" && cmd != "fish" && cmd != "sh" {
+                        cmd.clone()
                     } else {
-                        app.set_message("No pane to split");
+                        String::new()
+                    };
+
+                    if let Some(new_pane_id) = tmux::split_v(target, &shell_cmd, &wdir) {
+                        tmux::set_pane_title(&new_pane_id, &agent_name);
+                        tmux::select_pane(&new_pane_id);
+                        app.focused_agent_key = Some(format!(
+                            "{}/{}",
+                            app.state.folders[fi].name, agent_name
+                        ));
+                        app.set_message(&format!("Launched: {agent_name}"));
+                    } else {
+                        app.set_message("Failed to create pane");
                     }
 
                     save_state(&app.state, &app.workspace);

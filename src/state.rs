@@ -15,6 +15,9 @@ pub struct AgentState {
     pub status: AgentStatus,
     #[serde(skip)]
     pub git_branch: String,
+    /// Runtime: true when pane is hidden in background window
+    #[serde(skip)]
+    pub hidden: bool,
 }
 
 fn default_command() -> String {
@@ -135,6 +138,7 @@ mod tests {
                 pane_id: Some("%42".into()),
                 status: AgentStatus::Active,
                 git_branch: "main".into(),
+                hidden: false,
             });
         }
 

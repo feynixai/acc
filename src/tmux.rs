@@ -1,12 +1,16 @@
 use crate::state::{AgentState, AgentStatus, FolderState};
 use std::collections::HashMap;
 use std::env;
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
 const IDLE_THRESHOLD: u64 = 30;
+
+/// Run a tmux command. Public so handler can use it for join-pane with custom flags.
+pub fn tmux_cmd(args: &[&str]) -> String { tmux(args) }
 
 fn tmux(args: &[&str]) -> String {
     let mut cmd = Command::new("tmux");
@@ -60,6 +64,150 @@ pub fn session_exists(session: &str) -> bool {
         .unwrap_or(false)
 }
 
+// ── Tmux config ──
+
+/// Embedded Claude status script for the tmux status bar.
+const CLAUDE_STATUS_SCRIPT: &str = r#"#!/usr/bin/env bash
+# Shows Claude Code status in tmux status bar
+if pgrep -f "node.*claude" > /dev/null 2>&1; then
+  echo "● Claude"
+else
+  echo "○ Claude"
+fi
+"#;
+
+/// Ensure the claude status script exists at ~/.config/acc/tmux-claude-status.sh.
+fn ensure_claude_status_script() -> String {
+    let home = env::var("HOME").unwrap_or_default();
+    let dir = format!("{home}/.config/acc");
+    let path = format!("{dir}/tmux-claude-status.sh");
+    if !Path::new(&path).exists() {
+        let _ = fs::create_dir_all(&dir);
+        let _ = fs::write(&path, CLAUDE_STATUS_SCRIPT);
+        // Make executable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o755));
+        }
+    }
+    path
+}
+
+/// Apply navigation-only keybindings that are safe for any tmux session.
+/// Does NOT touch prefix, status bar, pane borders, etc.
+pub fn apply_acc_keybindings(session: &str) {
+    // Toggle sidebar: Alt-s from any pane.
+    // Use run-shell -b so tmux doesn't wait for exit or display signal noise
+    // when the sidebar pane (which spawned the toggle) gets killed.
+    let toggle_cmd = format!("{} sidebar-toggle", exe_path_for_toggle());
+    tmux(&["bind-key", "-n", "M-s", "run-shell", "-b", &toggle_cmd]);
+
+    // Quick navigation (no prefix)
+    tmux(&["bind-key", "-n", "M-z", "next-window"]);
+    tmux(&["bind-key", "-n", "M-Z", "previous-window"]);
+    tmux(&["bind-key", "-n", "M-a", "select-pane", "-t", ":.+"]);
+    tmux(&["bind-key", "-n", "M-A", "select-pane", "-t", ":.-"]);
+
+    // Display pane numbers
+    tmux(&["bind-key", "-n", "M-q", "display-panes"]);
+    tmux(&["set-option", "-t", session, "display-panes-time", "3000"]);
+    tmux(&["set-option", "-t", session, "display-panes-colour", "colour245"]);
+    tmux(&["set-option", "-t", session, "display-panes-active-colour", "white"]);
+
+    // Jump to pane by number
+    for i in 1..=9 {
+        let key = format!("M-{i}");
+        let target = format!(":.{i}");
+        tmux(&["bind-key", "-n", &key, "select-pane", "-t", &target]);
+    }
+}
+
+/// Apply acc's full tmux config to the given session.
+/// If ~/.config/acc/tmux.conf exists, source that instead of built-in defaults.
+pub fn apply_acc_tmux_config(session: &str) {
+    let home = env::var("HOME").unwrap_or_default();
+    let override_conf = format!("{home}/.config/acc/tmux.conf");
+
+    if Path::new(&override_conf).exists() {
+        tmux(&["source-file", &override_conf]);
+        return;
+    }
+
+    let status_script = ensure_claude_status_script();
+
+    // ── Prefix ──
+    tmux(&["unbind-key", "-T", "prefix", "C-b"]);
+    tmux(&["set-option", "-t", session, "prefix", "M-Space"]);
+    tmux(&["bind-key", "M-Space", "send-prefix"]);
+
+    // ── Mouse ──
+    tmux(&["set-option", "-t", session, "mouse", "on"]);
+
+    // ── Clipboard ──
+    tmux(&["set-option", "-t", session, "set-clipboard", "on"]);
+    tmux(&["bind-key", "-T", "copy-mode", "MouseDragEnd1Pane",
+        "send-keys", "-X", "copy-pipe-and-cancel", "pbcopy"]);
+    tmux(&["bind-key", "-T", "copy-mode-vi", "MouseDragEnd1Pane",
+        "send-keys", "-X", "copy-pipe-and-cancel", "pbcopy"]);
+
+    // ── Title / rename protection ──
+    tmux(&["set-option", "-t", session, "allow-set-title", "off"]);
+    tmux(&["set-option", "-t", session, "allow-rename", "off"]);
+    tmux(&["set-window-option", "-t", session, "automatic-rename", "off"]);
+
+    // ── Rename pane: prefix + T ──
+    tmux(&["bind-key", "T", "command-prompt", "-p", "Pane title:", "select-pane -T '%%'"]);
+
+    // ── Numbering starts at 1 ──
+    tmux(&["set-option", "-t", session, "base-index", "1"]);
+    tmux(&["set-window-option", "-t", session, "pane-base-index", "1"]);
+
+    // ── Theme: grey and white, black status bar ──
+    tmux(&["set-option", "-t", session, "status-style", "bg=black,fg=white"]);
+    tmux(&["set-option", "-t", session, "pane-border-style", "fg=colour250"]);
+    tmux(&["set-option", "-t", session, "pane-active-border-style", "fg=white"]);
+    tmux(&["set-option", "-t", session, "pane-border-status", "top"]);
+    tmux(&["set-option", "-t", session, "pane-border-format", " [#{pane_index}] #T "]);
+    tmux(&["set-option", "-t", session, "message-style", "bg=colour250,fg=black"]);
+    tmux(&["set-option", "-t", session, "message-command-style", "bg=colour250,fg=black"]);
+    tmux(&["set-option", "-t", session, "mode-style", "bg=white,fg=black"]);
+
+    // ── Status bar ──
+    tmux(&["set-option", "-t", session, "status-position", "bottom"]);
+    tmux(&["set-option", "-t", session, "status-justify", "left"]);
+    tmux(&["set-option", "-t", session, "status-left-length", "50"]);
+    tmux(&["set-option", "-t", session, "status-right-length", "100"]);
+    tmux(&["set-option", "-t", session, "status-interval", "2"]);
+
+    // Refresh status on pane focus
+    tmux(&["set-hook", "-t", session, "pane-focus-in", "refresh-client -S"]);
+
+    let status_left = "#[bg=colour255,fg=black,bold]  #S  #[bg=black] #[fg=colour245]P:#{pane_index}/#{window_panes} ";
+    tmux(&["set-option", "-t", session, "status-left", status_left]);
+
+    let status_right = format!(
+        "#(bash {})  #[fg=white]#{{b:pane_current_path}}  #[fg=colour245]#(cd #{{pane_current_path}} && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '-')  #[fg=white]%a %d %b  %H:%M ",
+        status_script
+    );
+    tmux(&["set-option", "-t", session, "status-right", &status_right]);
+
+    tmux(&["set-window-option", "-t", session, "window-status-format",
+        "#[fg=colour245]  #I #W  "]);
+    tmux(&["set-window-option", "-t", session, "window-status-current-format",
+        "#[bg=colour237,fg=white,bold]  #I #W  "]);
+    tmux(&["set-window-option", "-t", session, "window-status-separator", ""]);
+
+    // Navigation keybindings are applied unconditionally via apply_acc_keybindings()
+}
+
+/// Get the acc executable path for tmux keybindings.
+fn exe_path_for_toggle() -> String {
+    env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "acc".to_string())
+}
+
 // ── Session creation ──
 
 /// Create a new acc session with sidebar + shell, source user config, attach.
@@ -78,17 +226,21 @@ pub fn create_and_attach(session: &str, workspace: &str, exe: &str) {
         tmux(&["source-file", &conf]);
     }
 
-    // Split: sidebar on left (25%)
+    // Apply acc's full tmux config (after user config so acc layers on top)
+    apply_acc_tmux_config(session);
+
+    // Split: sidebar on left (20%)
     let sidebar_cmd = format!("{} sidebar '{}'", exe, workspace);
     tmux(&[
-        "split-window", "-hb", "-l", "25%",
+        "split-window", "-hb", "-l", "20%",
         "-t", &format!("{session}:1"),
         &sidebar_cmd,
     ]);
 
-    // Mark sidebar
+    // Mark sidebar and force 20% width
     let panes = tmux(&["list-panes", "-t", &format!("{session}:1"), "-F", "#{pane_id}"]);
     if let Some(first_pane) = panes.lines().next() {
+        tmux(&["resize-pane", "-t", first_pane, "-x", "20%"]);
         tmux(&["select-pane", "-t", first_pane, "-T", "acc-sidebar"]);
     }
 
@@ -130,16 +282,23 @@ pub fn create_sidebar(sidebar_cmd: &str) -> Option<(String, String)> {
     if right_pane.is_empty() { return None; }
 
     let sidebar = tmux(&[
-        "split-window", "-hb", "-l", "25%",
+        "split-window", "-hb", "-l", "20%",
         "-P", "-F", "#{pane_id}",
         sidebar_cmd,
     ]);
     if sidebar.is_empty() { return None; }
 
+    // Force 20% width — split-window -l can be ignored in some layouts
+    tmux(&["resize-pane", "-t", &sidebar, "-x", "20%"]);
     tmux(&["select-pane", "-t", &sidebar, "-T", "acc-sidebar"]);
     tmux(&["select-pane", "-t", &sidebar]);
 
     Some((sidebar, right_pane))
+}
+
+/// Re-enforce sidebar at 20% width. Call after any pane join/break/split.
+pub fn resize_sidebar(sidebar_pane: &str) {
+    tmux(&["resize-pane", "-t", sidebar_pane, "-x", "20%"]);
 }
 
 pub fn kill_sidebar() {
@@ -250,10 +409,15 @@ pub fn switch_to_folder_window(sidebar_pane: &str, target_window: &str, session:
     // If the sidebar was the last pane in its old window, that window is destroyed
     // and remaining window indices may shift — that's why we re-detect below.
     tmux(&[
-        "join-pane", "-hb", "-l", "25%",
+        "join-pane", "-hb", "-l", "20%",
         "-s", sidebar_pane,
         "-t", &join_target,
     ]);
+
+    // Force sidebar to 20% width. join-pane's -l flag is unreliable when the
+    // target window has complex layouts — the sidebar can end up squeezed to
+    // a sliver. An explicit resize after the join guarantees it.
+    tmux(&["resize-pane", "-t", sidebar_pane, "-x", "20%"]);
 
     // Select the window that now contains the sidebar (using stable pane ID).
     // This works even if window indices shifted after the old window was destroyed.
@@ -323,9 +487,107 @@ pub fn split_v(target_pane: &str, cmd: &str, cwd: &str) -> Option<String> {
     Some(result)
 }
 
+/// Split horizontally, placing new pane BEFORE target (top/left). Returns new pane_id.
+pub fn split_h_before(target_pane: &str, cmd: &str, cwd: &str) -> Option<String> {
+    let result = tmux(&[
+        "split-window", "-vb", "-t", target_pane, "-c", cwd,
+        "-P", "-F", "#{pane_id}",
+    ]);
+    if result.is_empty() { return None; }
+    if !cmd.is_empty() {
+        thread::sleep(Duration::from_millis(100));
+        tmux(&["send-keys", "-t", &result, cmd, "Enter"]);
+    }
+    Some(result)
+}
+
+/// Split vertically, placing new pane BEFORE target (left). Returns new pane_id.
+pub fn split_v_before(target_pane: &str, cmd: &str, cwd: &str) -> Option<String> {
+    let result = tmux(&[
+        "split-window", "-hb", "-t", target_pane, "-c", cwd,
+        "-P", "-F", "#{pane_id}",
+    ]);
+    if result.is_empty() { return None; }
+    if !cmd.is_empty() {
+        thread::sleep(Duration::from_millis(100));
+        tmux(&["send-keys", "-t", &result, cmd, "Enter"]);
+    }
+    Some(result)
+}
+
 /// Focus a pane.
 pub fn select_pane(pane_id: &str) {
     tmux(&["select-pane", "-t", pane_id]);
+}
+
+/// Zoom (maximize) a pane within its window.
+pub fn zoom_pane(pane_id: &str) {
+    tmux(&["resize-pane", "-Z", "-t", pane_id]);
+}
+
+/// Break a pane to a hidden background window. Process keeps running.
+pub fn break_pane_to_background(pane_id: &str, session: &str, folder_name: &str) {
+    let bg_window = format!("_acc_bg_{}", folder_name);
+    // Check if bg window already exists
+    let windows = tmux(&["list-windows", "-t", session, "-F", "#{window_name}"]);
+    let exists = windows.lines().any(|w| w == bg_window);
+    if exists {
+        // Join pane into existing bg window
+        let target = format!("{session}:{bg_window}");
+        tmux(&["join-pane", "-d", "-t", &target, "-s", pane_id]);
+    } else {
+        // Break pane to a new window named bg_window
+        tmux(&["break-pane", "-d", "-s", pane_id, "-n", &bg_window]);
+    }
+}
+
+/// Check if a pane is in a background `_acc_bg_*` window.
+pub fn is_pane_in_background(pane_id: &str, session: &str) -> bool {
+    let raw = tmux(&[
+        "list-panes", "-s", "-t", session,
+        "-F", "#{pane_id}|#{window_name}",
+    ]);
+    for line in raw.lines() {
+        if let Some((pid, wname)) = line.split_once('|') {
+            if pid == pane_id && wname.starts_with("_acc_bg_") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Join a hidden background pane back into a target window pane.
+/// Then re-enforce sidebar at 20% so it doesn't get squished.
+pub fn join_pane_back(pane_id: &str, target_pane: &str) {
+    tmux(&["join-pane", "-h", "-t", target_pane, "-s", pane_id]);
+    // Re-enforce sidebar width if it exists in this window
+    if let Some(sidebar) = sidebar_pane_id() {
+        tmux(&["resize-pane", "-t", &sidebar, "-x", "20%"]);
+    }
+}
+
+/// List panes in background windows for a folder.
+pub fn list_background_panes(session: &str, folder_name: &str) -> Vec<PaneInfo> {
+    let bg_window = format!("_acc_bg_{}", folder_name);
+    let raw = tmux(&[
+        "list-panes", "-s", "-t", session,
+        "-F", "#{pane_id}|#{pane_title}|#{pane_current_command}|#{pane_current_path}|#{window_name}",
+    ]);
+    let mut panes = Vec::new();
+    for line in raw.lines() {
+        let parts: Vec<&str> = line.splitn(5, '|').collect();
+        if parts.len() < 5 { continue; }
+        if parts[4] != bg_window { continue; }
+        if parts[1] == "acc-sidebar" { continue; }
+        panes.push(PaneInfo {
+            pane_id: parts[0].to_string(),
+            title: parts[1].to_string(),
+            command: parts[2].to_string(),
+            cwd: parts[3].to_string(),
+        });
+    }
+    panes
 }
 
 /// Kill a pane (agent).
@@ -376,6 +638,7 @@ pub fn build_agents_from_panes(
             pane_id: Some(pane.pane_id.clone()),
             status: AgentStatus::Active,
             git_branch: String::new(),
+            hidden: false,
         }
     }).collect()
 }
@@ -402,7 +665,8 @@ fn pane_activity_status(pane_id: &str) -> AgentStatus {
 // ── Reconnect ──
 
 /// On startup, match saved folders to existing tmux windows by name.
-pub fn reconnect_folders(folders: &mut [FolderState], session: &str) {
+/// Folders with no matching window are removed (session was killed).
+pub fn reconnect_folders(folders: &mut Vec<FolderState>, session: &str) {
     let raw = tmux(&[
         "list-windows", "-t", session, "-F", "#{window_index}|#{window_name}",
     ]);
@@ -411,6 +675,7 @@ pub fn reconnect_folders(folders: &mut [FolderState], session: &str) {
         .collect();
 
     for folder in folders.iter_mut() {
+        folder.window_index = None; // reset first
         for (idx, name) in &windows {
             if *name == folder.name {
                 folder.window_index = Some(idx.to_string());
@@ -418,6 +683,9 @@ pub fn reconnect_folders(folders: &mut [FolderState], session: &str) {
             }
         }
     }
+
+    // Drop folders whose tmux windows no longer exist
+    folders.retain(|f| f.window_index.is_some());
 }
 
 // ── Sync: rebuild agents from tmux panes ──
@@ -441,6 +709,28 @@ pub fn sync_folder_panes(folder: &mut FolderState, session: &str, fetch_git: boo
                 pane.cwd
             ));
         }
+    }
+
+    // Also scan background window for hidden panes
+    let bg_panes = list_background_panes(session, &folder.name);
+    let mut hidden_agents = build_agents_from_panes(&bg_panes, &folder.agents, &folder.name);
+    for (agent, pane) in hidden_agents.iter_mut().zip(bg_panes.iter()) {
+        agent.hidden = true;
+        agent.status = pane_activity_status(&pane.pane_id);
+    }
+    agents.extend(hidden_agents);
+
+    // Preserve original agent order from previous tick.
+    // New agents (not in prev) go at the end.
+    let prev_order: Vec<String> = folder.agents.iter()
+        .filter_map(|a| a.pane_id.clone())
+        .collect();
+    if !prev_order.is_empty() {
+        agents.sort_by_key(|a| {
+            a.pane_id.as_ref()
+                .and_then(|pid| prev_order.iter().position(|p| p == pid))
+                .unwrap_or(usize::MAX)
+        });
     }
 
     folder.agents = agents;
@@ -880,13 +1170,11 @@ mod tests {
 
         reconnect_folders(&mut folders, &session);
 
-        // my-project should get a window_index
+        // my-project should get a window_index, nonexistent should be removed
+        assert_eq!(folders.len(), 1, "unmatched folder should be removed");
+        assert_eq!(folders[0].name, "my-project");
         assert!(folders[0].window_index.is_some(),
             "folder matching window name should get reconnected");
-
-        // nonexistent should remain None
-        assert!(folders[1].window_index.is_none(),
-            "unmatched folder should stay disconnected");
 
         kill_test_session(&session);
     }

@@ -7,6 +7,18 @@ fn main() -> io::Result<()> {
     let exe_str = exe.to_string_lossy().to_string();
 
     match args.get(1).map(|s| s.as_str()) {
+        Some("sidebar-toggle") => {
+            // Called from tmux keybinding — toggle sidebar
+            if acc::tmux::inside_tmux() {
+                if acc::tmux::sidebar_pane_id().is_some() {
+                    acc::tmux::kill_sidebar();
+                } else {
+                    let cmd = format!("{} sidebar '{}'", exe_str, cwd);
+                    acc::tmux::create_sidebar(&cmd);
+                }
+            }
+            return Ok(());
+        }
         Some("kill" | "stop") => {
             if acc::tmux::inside_tmux() { acc::tmux::kill_sidebar(); }
             println!("Stopped.");

@@ -8,20 +8,14 @@ use ratatui::{
     Frame,
 };
 
-// ── Colors — refined dark theme ──
+// ── Colors — monochrome minimal with grey hierarchy ──
 
-const BG: Color = Color::Rgb(22, 22, 26);
-const BG_HEADER: Color = Color::Rgb(18, 18, 22);
-const BG_HOVER: Color = Color::Rgb(38, 38, 46);
-const BG_BAR: Color = Color::Rgb(28, 28, 34);
-const FG: Color = Color::Rgb(190, 194, 204);
-const FG_DIM: Color = Color::Rgb(92, 96, 108);
-const FG_MUTED: Color = Color::Rgb(58, 62, 72);
-const ACCENT: Color = Color::Rgb(100, 160, 255);
-const GREEN: Color = Color::Rgb(72, 199, 142);
-const YELLOW: Color = Color::Rgb(229, 192, 80);
-const RED: Color = Color::Rgb(235, 87, 87);
-const ORANGE: Color = Color::Rgb(230, 150, 60);
+const FG_DIM: Color = Color::Indexed(242);     // dark grey  — metadata, hints
+const FG_MID: Color = Color::Indexed(249);     // light grey — agent names
+const FG_BRIGHT: Color = Color::White;         // bright     — folders, selected
+const GREEN: Color = Color::Indexed(71);       // muted green — active dot
+const YELLOW: Color = Color::Indexed(179);     // muted amber — idle dot
+const RED: Color = Color::Indexed(131);        // muted red   — delete confirm
 
 // ── Draw ──
 
@@ -29,100 +23,86 @@ pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     let w = area.width;
 
-    // Responsive layout: skip elements that don't fit
-    let show_buttons = area.height > 8;
-    let show_bar = area.height > 6;
-
-    let mut constraints = vec![
-        Constraint::Length(2), // header
-        Constraint::Min(2),   // tree
-    ];
-    if show_buttons { constraints.push(Constraint::Length(1)); } // buttons
-    constraints.push(Constraint::Length(1)); // message/status bar
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
+        .constraints([
+            Constraint::Length(1), // header
+            Constraint::Min(2),   // tree
+            Constraint::Length(1), // status bar
+        ])
         .split(area);
 
-    let mut idx = 0;
-    draw_header(f, app, chunks[idx], w); idx += 1;
-    draw_tree(f, app, chunks[idx], w);   idx += 1;
-    if show_buttons { draw_buttons(f, chunks[idx], w); idx += 1; }
-    if show_bar { draw_status_bar(f, app, chunks[idx], w); }
+    draw_header(f, app, chunks[0], w);
+    draw_tree(f, app, chunks[1], w);
+    draw_status_bar(f, app, chunks[2], w);
 
     if matches!(app.input_mode, InputMode::AddFolder | InputMode::AddAgent) {
         draw_input(f, app);
     }
+    if app.input_mode == InputMode::Rename {
+        draw_rename(f, app);
+    }
+    if app.input_mode == InputMode::SendPrompt {
+        draw_send_prompt(f, app);
+    }
     if app.confirm_delete.is_some() {
         draw_confirm(f, app);
     }
+    if app.show_help {
+        draw_help_overlay(f);
+    }
 }
 
-// ── Header: workspace name + counts on one line ──
+// ── Header ──
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect, w: u16) {
     let agents = app.state.all_agents();
     let active = agents.iter().filter(|a| a.status == AgentStatus::Active).count();
     let idle = agents.iter().filter(|a| a.status == AgentStatus::Idle).count();
-    let stopped = agents.iter().filter(|a| a.status == AgentStatus::Stopped).count();
 
     let ws_name = std::path::Path::new(&app.workspace)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| app.workspace.clone());
 
-    // Truncate workspace name if needed
-    let max_name = (w as usize).saturating_sub(2);
-    let display_name = if ws_name.len() > max_name {
-        format!("{}...", &ws_name[..max_name.saturating_sub(3)])
-    } else {
-        ws_name
-    };
+    // Reserve space for counts: " BB  2● 1○"
+    let counts_len = format!("  {active}● {idle}○").len() + 2;
+    let max_name = (w as usize).saturating_sub(counts_len + 2);
+    let display_name = truncate(&ws_name, max_name);
 
-    let mut line2 = vec![
-        Span::styled(format!(" {active}"), Style::default().fg(GREEN)),
+    let spans = vec![
+        Span::styled(
+            format!("  {display_name}"),
+            Style::default().fg(FG_BRIGHT),
+        ),
     ];
-    if w > 12 {
-        line2.push(Span::styled(format!(" {idle}"), Style::default().fg(YELLOW)));
-    }
-    if w > 18 {
-        line2.push(Span::styled(format!(" {stopped}"), Style::default().fg(FG_DIM)));
-    }
 
-    let p = Paragraph::new(vec![
-        Line::from(Span::styled(
-            format!(" {display_name}"),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(line2),
-    ]).style(Style::default().bg(BG_HEADER));
+    let p = Paragraph::new(Line::from(spans));
     f.render_widget(p, area);
 }
 
 // ── Tree ──
 
 fn draw_tree(f: &mut Frame, app: &App, area: Rect, w: u16) {
-    let max_name_len = (w as usize).saturating_sub(10); // room for icon + indent + count
+    let max_name_len = (w as usize).saturating_sub(10);
 
     let items: Vec<ListItem> = app.tree_items().iter().map(|entry| match entry {
         TreeEntry::Folder(fi) => {
             let folder = &app.state.folders[*fi];
             let total = folder.agents.len();
             let is_active = app.active_folder_idx == Some(*fi);
-            let fc = if is_active { ACCENT } else { FG };
 
             let arrow = if is_active { "▾" } else { "▸" };
             let name = truncate(&folder.name, max_name_len);
 
             let mut spans = vec![
-                Span::styled(format!(" {arrow} "), Style::default().fg(FG_MUTED)),
-                Span::styled(name, Style::default().fg(fc).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {arrow} "), Style::default().fg(FG_DIM)),
+                Span::styled(name, Style::default().fg(FG_BRIGHT)),
             ];
             if w > 14 {
                 spans.push(Span::styled(
                     format!(" {total}"),
-                    Style::default().fg(FG_MUTED),
+                    Style::default().fg(FG_DIM),
                 ));
             }
 
@@ -130,137 +110,103 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect, w: u16) {
         }
         TreeEntry::Agent(fi, ai) => {
             let agent = &app.state.folders[*fi].agents[*ai];
-            let (icon, ic) = match agent.status {
-                AgentStatus::Active => ("●", GREEN),
-                AgentStatus::Idle => ("●", YELLOW),
-                AgentStatus::Stopped => ("○", FG_MUTED),
+            let (icon, ic) = if agent.hidden {
+                ("◌", FG_DIM)
+            } else {
+                match agent.status {
+                    AgentStatus::Active => ("●", GREEN),
+                    AgentStatus::Idle => ("●", YELLOW),
+                    AgentStatus::Stopped => ("○", FG_DIM),
+                }
             };
             let key = format!("{}/{}", agent.folder, agent.name);
             let is_focused = app.focused_agent_key.as_deref() == Some(&key);
-            let nc = if is_focused { ACCENT } else { FG };
-            let nm = if is_focused { Modifier::BOLD } else { Modifier::empty() };
+            let nc = if agent.hidden { FG_DIM } else if is_focused { FG_BRIGHT } else { FG_MID };
+            let nm = if is_focused && !agent.hidden { Modifier::BOLD } else { Modifier::empty() };
 
-            let agent_max = max_name_len.saturating_sub(4);
+            let agent_max = max_name_len.saturating_sub(8);
             let name = truncate(&agent.name, agent_max);
 
+            // 1-based pane number for quick jumping
+            let pane_num = ai + 1;
+
             let mut spans = vec![
-                Span::styled("   ", Style::default()),
-                Span::styled(icon, Style::default().fg(ic)),
-                Span::raw(" "),
+                Span::styled(
+                    format!("    {pane_num} "),
+                    Style::default().fg(FG_DIM),
+                ),
                 Span::styled(name, Style::default().fg(nc).add_modifier(nm)),
             ];
 
-            // Git branch only if enough room
             if !agent.git_branch.is_empty() && w > 25 {
-                let branch_max = (w as usize).saturating_sub(agent.name.len() + 12);
+                let branch_max = (w as usize).saturating_sub(agent.name.len() + 14);
                 let branch = truncate(&agent.git_branch, branch_max);
                 spans.push(Span::styled(
                     format!(" {branch}"),
-                    Style::default().fg(FG_MUTED),
+                    Style::default().fg(FG_DIM),
                 ));
             }
+
+            // Right-align status dot with margin from edge
+            let current_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let pad = (w as usize).saturating_sub(current_len + 3);
+            if pad > 0 {
+                spans.push(Span::raw(" ".repeat(pad)));
+            }
+            spans.push(Span::styled(icon, Style::default().fg(ic)));
+            spans.push(Span::raw(" "));
 
             ListItem::new(Line::from(spans))
         }
     }).collect();
 
+    // Focus-aware highlight
+    let hl_bg = if app.sidebar_focused {
+        Color::Indexed(237) // visible highlight
+    } else {
+        Color::Indexed(235) // subtle highlight
+    };
+
     let list = List::new(items)
-        .block(Block::default().borders(Borders::NONE).style(Style::default().bg(BG)))
-        .highlight_style(Style::default().bg(BG_HOVER))
+        .block(Block::default().borders(Borders::NONE))
+        .highlight_style(Style::default().bg(hl_bg))
         .highlight_symbol(">");
 
     f.render_stateful_widget(list, area, &mut app.list_state.clone());
 }
 
-// ── Buttons row — compact icons ──
+// ── Status bar ──
 
-fn draw_buttons(f: &mut Frame, area: Rect, w: u16) {
-    let mut spans = vec![
-        Span::styled(" +f", Style::default().fg(ACCENT)),
-        Span::styled(" +a", Style::default().fg(GREEN)),
-    ];
-    if w > 14 {
-        spans.push(Span::styled(" -x", Style::default().fg(RED)));
-    }
-    let p = Paragraph::new(Line::from(spans)).style(Style::default().bg(BG_HEADER));
-    f.render_widget(p, area);
-}
-
-// ── Status bar: message OR mini help — responsive ──
-
-fn draw_status_bar(f: &mut Frame, app: &App, area: Rect, w: u16) {
+fn draw_status_bar(f: &mut Frame, app: &App, area: Rect, _w: u16) {
     let text = match app.input_mode {
         InputMode::Command => {
             Line::from(vec![
-                Span::styled(":", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-                Span::styled(&app.cmd_buf, Style::default().fg(FG)),
-                Span::styled("_", Style::default().fg(ACCENT)),
+                Span::styled(":", Style::default().fg(FG_BRIGHT).add_modifier(Modifier::BOLD)),
+                Span::raw(&app.cmd_buf),
+                Span::styled("_", Style::default().fg(FG_BRIGHT)),
             ])
         }
         InputMode::Search => {
             Line::from(vec![
-                Span::styled("/", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-                Span::styled(&app.search_buf, Style::default().fg(FG)),
-                Span::styled("_", Style::default().fg(ACCENT)),
+                Span::styled("/", Style::default().fg(FG_BRIGHT).add_modifier(Modifier::BOLD)),
+                Span::raw(&app.search_buf),
+                Span::styled("_", Style::default().fg(FG_BRIGHT)),
             ])
         }
         InputMode::SendPrompt => {
-            Line::from(vec![
-                Span::styled("> ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-                Span::styled(&app.cmd_buf, Style::default().fg(FG)),
-                Span::styled("_", Style::default().fg(ACCENT)),
-            ])
+            // SendPrompt now uses a popup; status bar just shows hint
+            Line::from(Span::styled(" > sending...", Style::default().fg(FG_DIM)))
         }
         _ => {
             if let Some(ref msg) = app.message {
-                Line::from(Span::styled(format!(" {msg}"), Style::default().fg(ORANGE)))
+                Line::from(Span::styled(format!(" {msg}"), Style::default().fg(YELLOW)))
             } else {
-                // Mini help — adaptive to width
-                build_help_line(w)
+                Line::from(Span::styled(" ? help", Style::default().fg(FG_DIM)))
             }
         }
     };
-    let p = Paragraph::new(text).style(Style::default().bg(BG_BAR));
+    let p = Paragraph::new(text);
     f.render_widget(p, area);
-}
-
-/// Build a help line that fits the available width.
-fn build_help_line(w: u16) -> Line<'static> {
-    let w = w as usize;
-
-    // Priority tiers of hints — show as many as fit
-    let hints: &[(&str, &str)] = &[
-        ("Enter", "go"),
-        ("[/]", "win"),
-        ("n/p", "pane"),
-        ("f", "fold"),
-        ("a", "add"),
-        ("x", "del"),
-        ("u", "undo"),
-        ("r", "rst"),
-        (":", "cmd"),
-        ("/", "find"),
-        ("q", "quit"),
-    ];
-
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut used = 1; // leading space
-
-    for (key, label) in hints {
-        let needed = key.len() + label.len() + 2; // " key label"
-        if used + needed > w { break; }
-        spans.push(Span::styled(
-            format!(" {key}"),
-            Style::default().fg(FG_DIM),
-        ));
-        spans.push(Span::styled(
-            format!("{label}"),
-            Style::default().fg(FG_MUTED),
-        ));
-        used += needed;
-    }
-
-    Line::from(spans)
 }
 
 fn draw_input(f: &mut Frame, app: &App) {
@@ -293,28 +239,158 @@ fn draw_input(f: &mut Frame, app: &App) {
 
     let text = vec![
         Line::from(vec![
-            Span::styled(format!(" {title}"), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {step}"), Style::default().fg(FG_MUTED)),
+            Span::styled(format!(" {title}"), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {step}"), Style::default().fg(FG_DIM)),
         ]),
         Line::raw(""),
         Line::from(vec![
-            Span::styled("  > ", Style::default().fg(ACCENT)),
-            Span::styled(&app.input_buf, Style::default().fg(Color::White)),
-            Span::styled("_", Style::default().fg(ACCENT)),
+            Span::styled("  > ", Style::default().fg(FG_BRIGHT)),
+            Span::raw(&app.input_buf),
+            Span::styled("_", Style::default().fg(FG_BRIGHT)),
         ]),
         Line::raw(""),
         Line::from(vec![
-            Span::styled(format!("  {hint}"), Style::default().fg(FG_MUTED)),
-            Span::styled("  Esc cancel", Style::default().fg(FG_MUTED)),
+            Span::styled(format!("  {hint}"), Style::default().fg(FG_DIM)),
+            Span::styled("  Esc cancel", Style::default().fg(FG_DIM)),
         ]),
     ];
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(44, 44, 54)))
-        .style(Style::default().bg(Color::Rgb(30, 30, 38)));
+        .border_style(Style::default().fg(FG_DIM));
 
     let p = Paragraph::new(text).block(block);
+    f.render_widget(p, popup);
+}
+
+fn draw_rename(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let w = (area.width.saturating_sub(4)).min(44);
+    let h = 5;
+    let x = (area.width.saturating_sub(w)) / 2;
+    let y = (area.height.saturating_sub(h)) / 2;
+    let popup = Rect::new(x, y, w, h);
+
+    f.render_widget(Clear, popup);
+
+    let text = vec![
+        Line::from(Span::styled(
+            " Rename",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  > ", Style::default().fg(FG_BRIGHT)),
+            Span::raw(&app.input_buf),
+            Span::styled("_", Style::default().fg(FG_BRIGHT)),
+        ]),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(FG_DIM));
+
+    let p = Paragraph::new(text).block(block);
+    f.render_widget(p, popup);
+}
+
+fn draw_send_prompt(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let w = (area.width.saturating_sub(4)).min(44);
+    let h = 7;
+    let x = (area.width.saturating_sub(w)) / 2;
+    let y = (area.height.saturating_sub(h)) / 2;
+    let popup = Rect::new(x, y, w, h);
+
+    f.render_widget(Clear, popup);
+
+    let text = vec![
+        Line::from(Span::styled(
+            " Send to agent",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  > ", Style::default().fg(FG_BRIGHT)),
+            Span::raw(&app.cmd_buf),
+            Span::styled("_", Style::default().fg(FG_BRIGHT)),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  Enter", Style::default().fg(FG_BRIGHT).add_modifier(Modifier::BOLD)),
+            Span::styled(" send  ", Style::default().fg(FG_DIM)),
+            Span::styled("Esc", Style::default().fg(FG_BRIGHT).add_modifier(Modifier::BOLD)),
+            Span::styled(" cancel", Style::default().fg(FG_DIM)),
+        ]),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(FG_DIM));
+
+    let p = Paragraph::new(text).block(block);
+    f.render_widget(p, popup);
+}
+
+fn draw_help_overlay(f: &mut Frame) {
+    let area = f.area();
+    let w = (area.width.saturating_sub(2)).min(36);
+    let h = 33u16.min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(w)) / 2;
+    let y = (area.height.saturating_sub(h)) / 2;
+    let popup = Rect::new(x, y, w, h);
+
+    f.render_widget(Clear, popup);
+
+    let dim = Style::default().fg(FG_DIM);
+    let key_style = Style::default().fg(FG_MID);
+    let section = Style::default().fg(FG_BRIGHT).add_modifier(Modifier::BOLD);
+
+    let mut lines = vec![
+        Line::raw(""),
+        Line::from(Span::styled("  Navigation", section)),
+        Line::from(vec![Span::styled("  \u{2191}/\u{2193}       ", key_style), Span::styled("Select", dim)]),
+        Line::from(vec![Span::styled("  Enter     ", key_style), Span::styled("Focus pane", dim)]),
+        Line::from(vec![Span::styled("  1-9       ", key_style), Span::styled("Jump to pane #", dim)]),
+        Line::from(vec![Span::styled("  [/]       ", key_style), Span::styled("Prev/next window", dim)]),
+        Line::from(vec![Span::styled("  n/p       ", key_style), Span::styled("Prev/next pane", dim)]),
+        Line::raw(""),
+        Line::from(Span::styled("  Panes", section)),
+        Line::from(vec![Span::styled("  a         ", key_style), Span::styled("New agent", dim)]),
+        Line::from(vec![Span::styled("  c         ", key_style), Span::styled("Hide pane (bg)", dim)]),
+        Line::from(vec![Span::styled("  d         ", key_style), Span::styled("Close pane (kill)", dim)]),
+        Line::from(vec![Span::styled("  h/v       ", key_style), Span::styled("Split horiz/vert", dim)]),
+        Line::from(vec![Span::styled("  s         ", key_style), Span::styled("Stop agent", dim)]),
+        Line::from(vec![Span::styled("  r         ", key_style), Span::styled("Restart agent", dim)]),
+        Line::raw(""),
+        Line::from(Span::styled("  Workspace", section)),
+        Line::from(vec![Span::styled("  f         ", key_style), Span::styled("Add folder", dim)]),
+        Line::from(vec![Span::styled("  x         ", key_style), Span::styled("Delete", dim)]),
+        Line::from(vec![Span::styled("  R         ", key_style), Span::styled("Rename", dim)]),
+        Line::from(vec![Span::styled("  u         ", key_style), Span::styled("Undo delete", dim)]),
+        Line::raw(""),
+        Line::from(Span::styled("  Other", section)),
+        Line::from(vec![Span::styled("  :         ", key_style), Span::styled("Command mode", dim)]),
+        Line::from(vec![Span::styled("  /         ", key_style), Span::styled("Search", dim)]),
+        Line::from(vec![Span::styled("  >         ", key_style), Span::styled("Send prompt", dim)]),
+        Line::from(vec![Span::styled("  q         ", key_style), Span::styled("Quit sidebar", dim)]),
+        Line::raw(""),
+        Line::from(Span::styled("  Default agent cmd: \"claude\"", dim)),
+        Line::raw(""),
+        Line::from(Span::styled("  Press ? or Esc to close", dim)),
+    ];
+
+    // Trim lines to fit available height (account for border)
+    let max_lines = (h as usize).saturating_sub(2);
+    lines.truncate(max_lines);
+
+    let block = Block::default()
+        .title(" Keybindings ")
+        .title_style(Style::default().fg(FG_BRIGHT).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(FG_DIM));
+
+    let p = Paragraph::new(lines).block(block);
     f.render_widget(p, popup);
 }
 
@@ -349,17 +425,16 @@ fn draw_confirm(f: &mut Frame, app: &App) {
         )),
         Line::raw(""),
         Line::from(vec![
-            Span::styled("  Enter", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled("  Enter", Style::default().fg(FG_BRIGHT).add_modifier(Modifier::BOLD)),
             Span::styled(" yes  ", Style::default().fg(FG_DIM)),
-            Span::styled("Esc", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled("Esc", Style::default().fg(FG_BRIGHT).add_modifier(Modifier::BOLD)),
             Span::styled(" no", Style::default().fg(FG_DIM)),
         ]),
     ];
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(80, 36, 36)))
-        .style(Style::default().bg(Color::Rgb(36, 26, 28)));
+        .border_style(Style::default().fg(RED));
 
     let p = Paragraph::new(text).block(block);
     f.render_widget(p, popup);
@@ -368,14 +443,15 @@ fn draw_confirm(f: &mut Frame, app: &App) {
 // ── Helpers ──
 
 fn truncate(s: &str, max: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max {
+        return s.to_string();
+    }
     if max < 4 {
         return s.chars().take(max).collect();
     }
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}..", &s[..max.saturating_sub(2)])
-    }
+    let truncated: String = s.chars().take(max.saturating_sub(2)).collect();
+    format!("{truncated}..")
 }
 
 #[cfg(test)]
@@ -442,7 +518,6 @@ mod tests {
                 make_agent("agent-with-long-name-too", "VeryLongFolderNameThatOverflows", AgentStatus::Active, Some("%1")),
             ]),
         ]);
-        // 15 chars wide — should truncate, not panic
         let output = render_to_string(&app, 15, 10);
         assert!(!output.is_empty());
     }
@@ -476,7 +551,7 @@ mod tests {
         let mut app = make_app(vec![]);
         app.input_mode = InputMode::SendPrompt;
         app.cmd_buf = "hello".into();
-        let output = render_to_string(&app, 30, 10);
+        let output = render_to_string(&app, 50, 15);
         assert!(output.contains("hello"));
     }
 
@@ -518,17 +593,20 @@ mod tests {
     }
 
     #[test]
-    fn test_help_line_adapts_to_width() {
-        let wide = build_help_line(80);
-        let narrow = build_help_line(20);
-        // Wide should have more spans than narrow
-        assert!(wide.spans.len() > narrow.spans.len());
+    fn test_draw_rename_popup() {
+        let mut app = make_app(vec![make_folder("BB", vec![])]);
+        app.input_mode = InputMode::Rename;
+        app.input_buf = "NewName".into();
+        let output = render_to_string(&app, 50, 15);
+        assert!(output.contains("Rename"));
+        assert!(output.contains("NewName"));
     }
 
     #[test]
-    fn test_help_line_empty_at_zero() {
-        let line = build_help_line(0);
-        assert!(line.spans.is_empty());
+    fn test_status_bar_shows_help_hint() {
+        let app = make_app(vec![]);
+        let output = render_to_string(&app, 30, 10);
+        assert!(output.contains("? help"));
     }
 
     #[test]
@@ -588,7 +666,6 @@ mod tests {
         agent.git_branch = "main".into();
         let app = make_app(vec![make_folder("BB", vec![agent])]);
         let output = render_to_string(&app, 15, 10);
-        // Branch should be hidden on narrow width
         assert!(!output.contains("main"));
     }
 
@@ -612,17 +689,32 @@ mod tests {
     }
 
     #[test]
-    fn test_buttons_shown_tall() {
-        let app = make_app(vec![]);
-        let output = render_to_string(&app, 30, 12);
-        assert!(output.contains("+f"));
+    fn test_help_overlay_renders() {
+        let mut app = make_app(vec![]);
+        app.show_help = true;
+        let output = render_to_string(&app, 50, 40);
+        assert!(output.contains("Keybindings"));
     }
 
     #[test]
-    fn test_buttons_hidden_short() {
-        let app = make_app(vec![]);
-        // Very short terminal — buttons should be hidden
-        let output = render_to_string(&app, 30, 6);
-        assert!(!output.contains("+f"));
+    fn test_send_prompt_popup_renders() {
+        let mut app = make_app(vec![]);
+        app.input_mode = InputMode::SendPrompt;
+        app.cmd_buf = "hello".into();
+        let output = render_to_string(&app, 50, 15);
+        assert!(output.contains("Send to agent"));
+        assert!(output.contains("hello"));
+    }
+
+    #[test]
+    fn test_focus_aware_highlight() {
+        // Just verify both focus states render without panic
+        let mut app = make_app(vec![make_folder("BB", vec![
+            make_agent("a1", "BB", AgentStatus::Active, Some("%1")),
+        ])]);
+        app.sidebar_focused = true;
+        let _ = render_to_string(&app, 30, 10);
+        app.sidebar_focused = false;
+        let _ = render_to_string(&app, 30, 10);
     }
 }

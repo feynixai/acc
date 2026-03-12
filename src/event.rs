@@ -16,6 +16,9 @@ pub fn run_sidebar(workspace: &str) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // Set mouse cursor to pointer (arrow) instead of I-beam text cursor
+    // OSC 22 is supported by iTerm2, WezTerm, Kitty, foot, etc.
+    let _ = std::io::Write::write_all(&mut stdout, b"\x1b]22;pointer\x07");
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -23,6 +26,14 @@ pub fn run_sidebar(workspace: &str) -> io::Result<()> {
     let mut app = App::new(load_state(workspace), session.clone(), workspace.to_string());
 
     app.sidebar_pane_id = tmux::sidebar_pane_id();
+
+    // Always apply navigation keybindings (Alt+s toggle, etc.) — safe for any session
+    tmux::apply_acc_keybindings(&session);
+
+    // Full config (prefix, status bar theme, etc.) only for acc-owned sessions
+    if session.starts_with("acc-") {
+        tmux::apply_acc_tmux_config(&session);
+    }
 
     // Reconnect folders to existing tmux windows
     tmux::reconnect_folders(&mut app.state.folders, &session);
@@ -51,8 +62,14 @@ pub fn run_sidebar(workspace: &str) -> io::Result<()> {
                         InputMode::SendPrompt => {
                             command::handle_send_key(&mut app, key.code);
                         }
+                        InputMode::Rename => {
+                            handler::handle_rename_key(&mut app, key.code);
+                        }
                         InputMode::Normal => {
-                            if app.confirm_delete.is_some() {
+                            if app.show_help {
+                                // Any key closes help overlay
+                                app.show_help = false;
+                            } else if app.confirm_delete.is_some() {
                                 match key.code {
                                     KeyCode::Enter | KeyCode::Char('y') => handler::execute_delete(&mut app),
                                     KeyCode::Esc | KeyCode::Char('n') => { app.confirm_delete = None; }
@@ -60,6 +77,7 @@ pub fn run_sidebar(workspace: &str) -> io::Result<()> {
                                 }
                             } else {
                                 match key.code {
+                                    KeyCode::Char('?') => { app.show_help = true; }
                                     KeyCode::Char('q') => break,
                                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                                     KeyCode::Char(':') => command::start_command(&mut app),
@@ -72,10 +90,12 @@ pub fn run_sidebar(workspace: &str) -> io::Result<()> {
                                     KeyCode::Char('a') => handler::start_add_agent(&mut app),
                                     KeyCode::Char('h') => handler::split_agent(&mut app, 'h'),
                                     KeyCode::Char('v') => handler::split_agent(&mut app, 'v'),
+                                    KeyCode::Char('c') => handler::hide_pane(&mut app),
                                     KeyCode::Char('d') => handler::close_selected_pane(&mut app),
                                     KeyCode::Char('s') => handler::stop_selected(&mut app),
                                     KeyCode::Char('r') => handler::restart_selected(&mut app),
                                     KeyCode::Char('x') => handler::remove_selected(&mut app),
+                                    KeyCode::Char('R') => handler::start_rename(&mut app),
                                     KeyCode::Char('u') => handler::undo_last(&mut app),
                                     KeyCode::Char('[') => handler::prev_window(&mut app),
                                     KeyCode::Char(']') => handler::next_window(&mut app),
@@ -130,10 +150,13 @@ pub fn run_sidebar(workspace: &str) -> io::Result<()> {
         } else {
             // Tick: sync panes for ALL folders
             app.tick_message();
+            handler::update_sidebar_focus(&mut app);
             handler::sync_all_folders(&mut app);
         }
     }
 
+    // Restore default cursor shape
+    let _ = std::io::Write::write_all(&mut terminal.backend_mut(), b"\x1b]22;\x07");
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;

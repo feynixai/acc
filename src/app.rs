@@ -27,6 +27,8 @@ pub struct App {
     pub search_idx: usize,
     pub quit_requested: bool,
     pub undo_stack: Vec<UndoEntry>,
+    pub sidebar_focused: bool,
+    pub show_help: bool,
 }
 
 /// Captures enough info to recreate a deleted agent or folder.
@@ -45,7 +47,7 @@ pub enum UndoEntry {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum InputMode { Normal, AddFolder, AddAgent, Command, SendPrompt, Search }
+pub enum InputMode { Normal, AddFolder, AddAgent, Command, SendPrompt, Search, Rename }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputField { Name, Path, Command }
@@ -71,6 +73,8 @@ impl App {
             search_idx: 0,
             quit_requested: false,
             undo_stack: Vec::new(),
+            sidebar_focused: true,
+            show_help: false,
         }
     }
 
@@ -131,6 +135,7 @@ pub mod tests {
             pane_id: pane_id.map(|s| s.into()),
             status,
             git_branch: String::new(),
+            hidden: false,
         }
     }
 
@@ -324,6 +329,7 @@ pub mod tests {
             InputMode::Command,
             InputMode::Search,
             InputMode::SendPrompt,
+            InputMode::Rename,
         ];
         // Verify all variants are distinct
         for (i, a) in modes.iter().enumerate() {
