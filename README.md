@@ -42,17 +42,22 @@ Think VS Code's sidebar, but for terminal agents.
 ## Install
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/feynixai/acc/main/install.sh | bash
+```
+
+This will download a prebuilt binary if available, or build from source automatically. It also installs tmux and Rust if needed.
+
+<details>
+<summary>Manual install</summary>
+
+```bash
 git clone https://github.com/feynixai/acc.git
 cd acc
 cargo build --release
-cp target/release/acc ~/.local/bin/   # or /usr/local/bin/
+cp target/release/acc ~/.local/bin/
 ```
 
-Verify:
-
-```bash
-acc --help
-```
+</details>
 
 ## Quick Start
 
